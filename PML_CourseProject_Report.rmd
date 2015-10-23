@@ -1,0 +1,208 @@
+---
+title: "Machine Learning Course Project"
+author: "Frank Sauvage"
+date: "Friday, October 09, 2015"
+output: html_document
+---
+
+Objective: predict the manner in which user did a barbell lift exercise. The report describs how the model was built, the use of cross validation, the expected out of sample error and explain the choices made.
+
+Setting of the working directory, loading of required packages and loading and checking of the data sets
+
+```{r}
+options(warn=-1)
+setwd("D:/Statsphere/Formation_DataScience/Course 8 Machine Learning/Course Project")
+library(caret)
+library(timeSeries)
+library(e1071)
+dataCP <- read.csv("pml-training.csv") #Course Project data
+data.toPredict <- read.csv("pml-testing.csv") #the Course Project data to predict for the submission part
+head(dataCP)[,2:8]
+head(data.toPredict)[,2:8]
+dim(dataCP)
+dim(data.toPredict)
+names(dataCP)[1:10]
+```
+
+**_MACHINE LEARNING ALGORITHM BUILDING STEPS_**
+
+1. **_Training and testing sets preparation_** 
+
+Once data are loaded we start by splitting the available dataset in an actual training set and a set aside testing set that will be used to estimate the out-of-sample error.
+
+   For that, we must be sure there is no unwanted structuration, especially ordering, of our dataset that may introduce biases in our training/cross-validation dataset.
+   
+  + E.g. taking the 70% first samples, we may then exclude some classes from the training set and get them only in the test set.
+  
+  + Another concern may be the attention to pay to the "time window" structure of the data, that is announced in the brief description of the dataset at <http://groupware.les.inf.puc-rio.br/har>. 
+
+```{r}
+#Are the exercices ordered by class or user?
+dataCP[c(1:3, 101:103, 1001:1003), c("user_name","classe", "num_window")]
+dataCP[c(1:3, 101:103, 1001:1003)+18500, c("user_name","classe", "num_window")]
+#How many measures by time window?
+table(dataCP$num_window)[1:10]
+```
+   The dataset is actually ordered accordingly to the classe of exercice. However, the default behavior of the createDataPartition() function is to sample the data in an attempt to balance the class distributions whenever the outcome is a factor vector.
+   
+   The number of readings by time window does change so maybe it is not the structuration level we will consider.
+   
+   Before exploring further the variables and starting to be influenced by what we see, let's split the data to keep an untouched testing set without consideration for anything else than the **classe** variable.
+```{r}
+set.seed(100)# for reproducibility as we will draw samples in the following commands and analyses
+indTrain <- createDataPartition(dataCP$classe, times=1, p=0.70, list=FALSE)
+training <- dataCP[indTrain, ] 
+testing <- dataCP[-indTrain, ]
+dim(training)
+dim(testing)
+#check of the repartition of exercice classes in the training set
+table(training$classe)
+```
+
+The training data should also allow to get a good estimate of the out of sample error. For this purpose, the training set is split in 10 folds for a k=10-fold cross-validation of the tested models.
+```{r}
+set.seed(200)
+folds <- createFolds(y=train$classe,k=10,list=TRUE)
+sapply(folds,length)
+```
+
+2. **_Data exploration:_** 
+
+Then we begin the exploration of what's in the variables.
+At start, the goal is just to remove almost void of information data.
+
+```{r}
+summary(training)[,10:15] #only several columns presented to keep a readable report
+# Removal of near zero variables
+nzvar<- nearZeroVar(training, saveMetrics=TRUE)
+nzvar[5:15,]
+train <- training[,nzvar$nzv==F]
+dim(train)
+# 52 variables removed for lack of variablity
+summary(train)[,10:15] #still some variables with huge number of NA
+sapply(train,function(x) sum(is.na(x)))[10:15] #count NA per variable
+# The variables contain either a lot of NA values (>13,000) or none. 
+col.NA <- sapply(train,function(x) sum(is.na(x)))>0 # index of variables with NAs (>99% NAs then)
+```
+   Variables with > 99% NA correspond to averages/min/max by time window. We will split data as a train set without these average variables (RAW table) and a train.avg set (SUMMARY table) containing only the results at time window change to explore if we may focus on these summary variables.
+
++ Table of RAW variables
+```{r}
+train <- train[,col.NA==F] #remove columns with NA (either 0 or >13,000 NA)
+dim(train) #49 columns removed
+train[1:5,1:6]
+#The first six columns contain information about ID, timestamping and time window ID, which don't seem relevant to characterize the weight lifting exercices. They are removed.
+train <- train[,-seq(1,6)]
+names(train)[c(1:5,ncol(train))] #according to variable names, only the classe of move and sensors'outputs remain.
+dim.train <- dim(train)
+```
+   train is a table of 53 variables: 52 predictors and the classe outcome.
+
+   We need to clean the testing dataset and the Course Project data set to predict the same way we did for the training set.
+```{r}
+test <- testing[,nzvar$nzv==F]
+test <- test[,col.NA==F]
+test <- test[,-seq(1,6)]
+dim(test)
+data.toPredict <- data.toPredict[,nzvar$nzv==F]
+data.toPredict <- data.toPredict[,col.NA==F]
+data.toPredict <- data.toPredict[,-seq(1,6)]
+dim(data.toPredict)
+colnames(data.toPredict)[c(1:5,ncol(data.toPredict))]
+```
+
+We should study the variable distributions and the relationships among them now to decide if transformation or dimensionality reduction are relevant.
+```{r}
+#Are some variable correlations high?
+cor.mat <- cor(train[,-ncol(train)])
+sum(cor.mat[upper.tri(cor.mat, diag = FALSE)]>0.7)
+```
+22 pairs of predictors present quite high correlations. As all remaining predictors are numeric, we can explore what dimensionality reduction could be bring by a PCA.
+```{r}
+# create preprocess object
+#without specification about pcaComp, preProcess computes the number of PC required from thresh
+pca.proc <- preProcess(train[,-ncol(train)], method="pca",thresh=0.95)
+pca.proc
+# calculate PCs for training data
+trainPC <- predict(pca.proc,train[,-ncol(train)])
+# calculate PCs for test data
+testPC <- predict(pca.proc,test[,-ncol(test)])
+```
+The PCA allows to keep 95% of the 52 predictors' variability with only 25 orthogonal PCs. This decrease of more than half in the number of features may speed up models fitting without loss of much information.
+
++ Table of SUMMARY variables
+```{r}
+train.avg <- training[!is.na(training$max_roll_belt),] #train set containing average values
+train.avg <- train.avg[,nzvar$nzv==F]
+dim(train.avg)
+#For the train.avg set, we will keep the "num_window" variable to keep track of individual WLE composed of several windows
+train.avg.data <- train.avg[,-c(1:5)]
+dim(train.avg.data)
+summary(train.avg.data)[,1:8]
+```
+Few summary samples are left and the corresponding transformations for the 20 samples to predict (in data.toPredict) are unclear. The focus will then certainly putted on the "raw data from sensors".
+
+3. **_Model selection :_** 
+
+4 first models will be run to get a feeling of where are we starting at and which model present the highest potential.
+  + Random forest on summary data
+  + Random forest on raw data
+  + Random forest on PCA pre-processed data
+  + SVM on PCA pre-processed data
+  
+  We will manually proceed to the 10-fold cross validation using the **folds** created above for the last 3 models (the first over summary data has only the samples corresponding to window shifts).
+  For random forest, we will use at first the classical mtry=round(sqrt(n),0) with n=number of predictors, ntree=150 and see afterwards if this number is enough or should be increase
+  For SVM, we will use at first cost=100 and gamma=0.5 values for the svm() function.
+
+```{r}
+#model.avg: Random Forest on summary data
+model.avg <- train(classe~., data=train.avg.data, method="rf")
+mean(model.avg$resample$Accuracy)
+mtry <- round(sqrt(ncol(train)-1),0)
+ntree <- 150
+cost=100
+gamma=0.5
+accuracy <- matrix(0,11,4)
+colnames(accuracy) <- c("Fold", "RF.raw", "RF.pca", "SVM.pca")
+for (ii in 1:length(folds)){#14h30
+        #RF.raw: Random Forest on raw data
+        rf.raw <- randomForest(classe~., data=train[-folds[[ii]],], mtry=mtry, ntree=ntree)
+        accuracy[ii, 2] <- round(confusionMatrix(train$classe[folds[[ii]]],predict(rf.raw,train[folds[[ii]],]))$overall[1],3)
+        #RF.pca: Random Forest on PCA pre-processed data
+        rf.pca <- randomForest(train$classe[-folds[[ii]]]~., data=trainPC[-folds[[ii]],], mtry=mtry, ntree=ntree)
+        accuracy[ii, 3] <- round(confusionMatrix(train$classe[folds[[ii]]],predict(rf.pca,trainPC[folds[[ii]],]))$overall[1],3)
+        #SVM.pca: Support Vector Machine on PCA pre-processed data
+        svm.pca <- svm(train$classe[-folds[[ii]]]~., data=trainPC[-folds[[ii]],], cost = cost, gamma = gamma, cross = 0)
+        accuracy[ii, 4] <- round(as.numeric(classAgreement(table(pred = predict(svm.pca, trainPC[folds[[ii]],]), true = train$classe[folds[[ii]]]))[1]),3)
+        }
+accuracy[length(folds)+1,2:4] <- colMeans(accuracy[1:length(folds),2:4])
+accuracy[,1] <- c(as.character(seq(1,length(folds))), "Avg")
+accuracy
+```
+
+4. **_Model exploration and tuning if required :_**
+
+From the above **accuracy table**, the model over the summary variables appears far less accurate than those over the "raw data" with an accuracy below 80%. Anyway, the corresponding data would be difficult to obtain from new readings as the number of readings per time window and the required calculations are unclear.
+
+On the other hand, the last three models are already quite accurate with expected out of sample errors below 3% in all cases. The best one at this stage is the random forest over raw readings values.
+
+We will focus on this one and explore it further. The high accuracy it reveals does not really call for further tuning. Let's start by training it over the whole training data set. 
+```{r}
+model.rf <- randomForest(classe~., data=train, mtry=mtry, ntree=ntree)
+#Diagnostics: Do we need more than 150 trees by forest to correctly assess the OOB (Out Of the Bag) error, or can we decrease this number to increase the training speed?
+plot(1:ntree, model.rf$err.rate[,1], pch="+",main="Estimated out of sample error for the final model \n according to the number of grown trees by sampling", xlab="Number of trees", ylab="Out of the Bag Error", cex.main=0.8) 
+#OOB error decrease as the number of grown trees increases. ntree <- 150 appears enough to reach plateau.
+data.frame(MeanDecreaseGini=model.rf$importance[order(model.rf$importance, decreasing = T),]) #importance of variables by decreasing order
+min(model.rf$oob.times); max(model.rf$oob.times)#range of the number of times each sample was held "out of the bag" to build individual trees from bootstrap samplings
+paste(round(model.rf$err.rate[ntree, 1]*100,2),"%", sep=" ")# Overall % out of sample error estimated over OOB from the ntree bootstrap samplings.
+```
+
+5. **_Out of sample error calculation through the testing set_**
+
+The model appears to supply quite accurate predictions. We will use the saved test set, never looked at yet, to get a final independent from training estimation of the accuracy (=(1-out of sample error)*100%).
+Our expectation for the accuracy is about 99.3% and is about 0.67% for the error from previous results.
+```{r}
+confusionMatrix(test$classe, predict(model.rf, test))
+```
+From the test set, the accuracy and Kappa values are about 99.5%,  what implies an out of sample error about 0.5%.
+
